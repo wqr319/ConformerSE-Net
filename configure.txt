@@ -1,0 +1,7 @@
+L=8, B=3, dim=512
+loss = MSE(irm) + MSE(wave)
+
+for DNS:
+    Adam, 5e-4, 0.05, 400
+for VBD:(pretrained)
+    Adam, 5e-5, 0.05, 200
