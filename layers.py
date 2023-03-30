@@ -34,7 +34,6 @@ class ConvModule(nn.Module):
         super().__init__()
         self.kernel_size = kernel_size
         self.point_conv1 = nn.Sequential(
-            nn.BatchNorm1d(input_dim),
             PointwiseConv(input_dim, 2 * channels, stride=1, bias=True),
             nn.GLU(dim=1)
         )
@@ -45,7 +44,6 @@ class ConvModule(nn.Module):
         )
         self.point_conv2 = nn.Sequential(
             PointwiseConv(channels, input_dim, stride=1, bias=True),
-            nn.PReLU()
         )
     def forward(self,x):
         # b,f,t
@@ -88,21 +86,21 @@ class TCN(nn.Module):
         self.dilation = dilation
         self.r = 1
         self.conv1 = nn.Sequential(
+            PointwiseConv(self.input_dim, self.input_dim//self.r),
             nn.BatchNorm1d(input_dim),
             nn.PReLU(),
-            PointwiseConv(self.input_dim, self.input_dim//self.r)
         )
         self.conv2 = nn.Sequential(
+            nn.Conv1d(self.input_dim//self.r, self.input_dim//self.r, kernel_size,
+                    padding='valid',
+                    dilation=self.dilation),
             nn.BatchNorm1d(input_dim//self.r),
             nn.PReLU(),
-            DepthwiseConv(self.input_dim//self.r, self.input_dim//self.r, kernel_size,
-                        padding='valid',
-                        dilation=self.dilation),
         )
         self.conv3 = nn.Sequential(
+            PointwiseConv(self.input_dim//self.r, self.input_dim),
             nn.BatchNorm1d(input_dim//self.r),
             nn.PReLU(),
-            PointwiseConv(self.input_dim//self.r, self.input_dim)
         )
     
     def forward(self,x):
@@ -116,7 +114,7 @@ class TCN(nn.Module):
         x = x + residual
         return x
 
-class Block(nn.Module):
+class DPMConformer(nn.Module):
     '''
     required:   (b,t,f)
     input_dim:  frequency dim or channel dim of input,
@@ -129,21 +127,23 @@ class Block(nn.Module):
         self.kernel_size = kernel_size
 
         self.ffn1 = FFN(input_dim, ffn_dim, gru=False)
-
-        self.time_attn_layer_norm = nn.LayerNorm(input_dim)
-        self.time_attention = nn.MultiheadAttention(input_dim,num_heads,batch_first=True)
-
+        
+        # self.time_attn_layer_norm = nn.LayerNorm(input_dim)
+        # self.time_attention = nn.MultiheadAttention(input_dim,num_heads,batch_first=True,)
+        
+        self.layer_norm_before_conv = nn.LayerNorm(input_dim)
         self.conv_block = ConvModule(input_dim, hidden_dim, kernel_size)
         
         self.freq_attention_1_avg = nn.AvgPool1d(kernel_size=11, stride=1)
         self.freq_attention_1_max = nn.MaxPool1d(kernel_size=11, stride=1)
         self.freq_attention_2 = nn.Sequential(
-            nn.Linear(input_dim, input_dim//2),
+            nn.Linear(input_dim, input_dim),
             nn.PReLU(),
-            nn.Linear(input_dim//2, input_dim),
+            nn.Linear(input_dim, input_dim),
         )
 
         self.ffn2 = FFN(input_dim, ffn_dim, gru=False)
+        self.final_layer_norm = nn.LayerNorm(input_dim)
 
     def generate_square_subsequent_mask(self, sz):
             """Generate a square mask for the sequence. The masked positions are filled with float('-inf').
@@ -160,15 +160,17 @@ class Block(nn.Module):
         x = x * 0.5 + residual
 
         # time attention: b,t,f
-        residual = x
-        x = self.time_attn_layer_norm(x)
-        n_frame = x.shape[1]
-        mask = self.generate_square_subsequent_mask(n_frame).cuda()
-        x, _ = self.time_attention(query=x,key=x,value=x,need_weights=True,attn_mask=mask)
-        x = x + residual
+        # residual = x
+        # x = self.time_attn_layer_norm(x)
+        # n_frame = x.shape[1]
+        # mask = self.generate_square_subsequent_mask(n_frame).cuda()
+        # # mask = self.generate_square_subsequent_mask(n_frame)
+        # x, _ = self.time_attention(query=x,key=x,value=x,need_weights=True,attn_mask=mask)
+        # x = x + residual
 
         # conv: b,t,f
         residual = x
+        x = self.layer_norm_before_conv(x)
         x = x.transpose(-1,-2)   # b,f,t
         x = self.conv_block(x)
         x = x.transpose(-1,-2)
@@ -190,6 +192,8 @@ class Block(nn.Module):
         residual = x
         x = self.ffn2(x)
         x = x * 0.5 + residual
+
+        x = self.final_layer_norm(x)
         return x
 
 
@@ -198,6 +202,7 @@ class Net(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.w = torch.hann_window(512+2)[1:-1].cuda()
+        # self.w = torch.hann_window(512+2)[1:-1]
 
         ######### STAGE I ##############
         self.B = cfg['B']
@@ -210,7 +215,7 @@ class Net(nn.Module):
             TCN(256, 1) for i in range(self.L)
         ])
         self.net = nn.ModuleList([
-            Block(256,
+            DPMConformer(256,
                 self.ffn_dim,
                 self.hidden_dim,
                 self.kernel_size,

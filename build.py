@@ -6,6 +6,7 @@ import pytorch_lightning as pl
 import pytorch_lightning.callbacks as callbacks
 import pytorch_lightning.loggers as loggers
 import torch.nn.functional as F
+from torchmetrics import ScaleInvariantSignalNoiseRatio
 import torch.optim
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -33,7 +34,7 @@ class LightningNet(pl.LightningModule):
         self.steps_per_epoch = steps_per_epoch
         self.dataset = cfg['dataset']
         if self.dataset=='VBD':
-            self.model.load_state_dict(torch.load('log/DNS/_TA_FA/DNS_pretrained_model.pth'))
+            self.model.load_state_dict(torch.load('log/DNS/O/pretrained.pth'))
             print('Using DNS pretrained model to train on VBD')
 
         self.w = torch.hann_window(512+2)[1:-1].cuda()
@@ -47,7 +48,7 @@ class LightningNet(pl.LightningModule):
                             center=True,return_complex=True))
         target_irm = target / (noisy + eps)
         target_irm.clamp_(0, 1)
-        loss_1 = F.mse_loss(predict_irm, target_irm)
+        loss_1 = F.mse_loss(predict_irm, target_irm) + F.mse_loss(predict_irm*noisy, target)
         ################## Stage II ###################
         loss_2 = F.mse_loss(enhanced_wav, target_wav)
 
@@ -66,7 +67,7 @@ class LightningNet(pl.LightningModule):
                             center=True,return_complex=True))
         target_irm = target / (noisy + eps)
         target_irm.clamp_(0, 1)
-        loss_1 = F.mse_loss(predict_irm, target_irm)
+        loss_1 = F.mse_loss(predict_irm, target_irm) + F.mse_loss(predict_irm*noisy, target)
         ################## Stage II ###################
         loss_2 = F.mse_loss(enhanced_wav, target_wav)
 
@@ -129,7 +130,10 @@ class LightningNet(pl.LightningModule):
         ################# DNS #############################
         ###################################################
         if self.cfg['dataset']=='DNS':
+            sisnr_ = ScaleInvariantSignalNoiseRatio()
             pesq_list_dns_no_reverb = []
+            stoi_list = []
+            sisnr_list = []
             def take_last(name):
                 name = name.split('.')[0]
                 id = name.split('_')[-1]
@@ -149,48 +153,24 @@ class LightningNet(pl.LightningModule):
                 noisy_wav = F.pad(noisy_wav, (0, n_frames*256 + 512 - len(noisy_wav)))
                 target_wav = F.pad(target_wav, (0, n_frames*256 + 512 - len(target_wav)))
 
-                target_wav = target_wav.detach().cpu().numpy()
+                target_wav = target_wav.detach().cpu()
                 irm, enhanced_wav = self.model(noisy_wav.unsqueeze(0))
-                enhanced_wav = enhanced_wav.squeeze().detach().cpu().numpy()
-            
+                enhanced_wav = enhanced_wav.squeeze().detach().cpu()
+                sisnr = sisnr_(enhanced_wav, target_wav)
+
+                target_wav = target_wav.numpy()
+                enhanced_wav = enhanced_wav.numpy()
                 noisy_wav = noisy_wav.detach().cpu().numpy()
                 csig, cbak, covl = pysepm.composite(target_wav, enhanced_wav, 16000)
                 pesq = pysepm.pesq(target_wav, enhanced_wav, 16000)[1]
+                stoi = pysepm.stoi(target_wav,enhanced_wav,16000)
                 pesq_list_dns_no_reverb.append(pesq)
+                stoi_list.append(stoi)
+                sisnr_list.append(sisnr)
             
             self.log('pesq_dns_no_reverb', mean(pesq_list_dns_no_reverb), batch_size=1)
-
-            # ###################################################
-            
-            # pesq_list_dns_with_reverb = []
-            # def take_last(name):
-            #     name = name.split('.')[0]
-            #     id = name.split('_')[-1]
-            #     return id
-            # clean_files = os.listdir('/home/wqr/DNS_test/1/test_set/synthetic/with_reverb/clean')
-            # noisy_files = os.listdir('/home/wqr/DNS_test/1/test_set/synthetic/with_reverb/noisy')
-            # clean_files.sort(key=take_last)
-            # noisy_files.sort(key=take_last)
-            # for i, (clean_name, noisy_name) in tqdm(enumerate(zip(clean_files, noisy_files))):
-            #     noisy_wav = torchaudio.load(
-            #             os.path.join('/home/wqr/DNS_test/1/test_set/synthetic/with_reverb/noisy', noisy_name))[0][0].cuda()
-            #     target_wav = torchaudio.load(
-            #             os.path.join('/home/wqr/DNS_test/1/test_set/synthetic/with_reverb/clean', clean_name))[0][0].cuda()
-
-            #     n_frames = len(noisy_wav)//256 - 1
-            #     noisy_wav = F.pad(noisy_wav, (0, n_frames*256 + 512 - len(noisy_wav)))
-            #     target_wav = F.pad(target_wav, (0, n_frames*256 + 512 - len(target_wav)))
-
-            #     target_wav = target_wav.detach().cpu().numpy()
-            #     irm, enhanced_wav = self.model(noisy_wav.unsqueeze(0))
-            #     enhanced_wav = enhanced_wav.squeeze().detach().cpu().numpy()
-            
-            #     noisy_wav = noisy_wav.detach().cpu().numpy()
-            #     csig, cbak, covl = pysepm.composite(target_wav, enhanced_wav, 16000)
-            #     pesq = pysepm.pesq(target_wav, enhanced_wav, 16000)[1]
-            #     pesq_list_dns_with_reverb.append(pesq)
-            
-            # self.log('pesq_dns_with_reverb', mean(pesq_list_dns_with_reverb), batch_size=1)
+            self.log('stoi', mean(stoi_list), batch_size=1)
+            self.log('sisnr', mean(sisnr_list), batch_size=1)
 
         return None
 
