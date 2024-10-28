@@ -1,1 +1,1 @@
-This is the code of my project "A real-time Conformer-based Model for Speech Enhancement".
+This is the code of my paper “A Low Computation Cost Model for Real-Time Speech Enhancement”.
